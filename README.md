@@ -168,6 +168,62 @@ The intent agent populates `raw_override` automatically when you mention provide
 
 ---
 
+## Brownfield: deploying into existing infrastructure
+
+Most teams already have a VPC, subnets, and shared networking. Use `existing_resources` to reference them without Terraform trying to own them:
+
+```yaml
+schema_version: v1
+name: my-api
+components:
+  - name: webserver
+    role: web_api
+    requirements:
+      size_hint: small
+
+existing_resources:
+  - name: main-vpc
+    type: aws_vpc
+    lookup:
+      id: vpc-0abc1234        # exact ID (preferred)
+    description: Existing prod VPC
+  - name: app-subnet
+    type: aws_subnet
+    lookup:
+      id: subnet-0def5678
+  - name: app-subnet          # tag-based lookup also supported
+    type: aws_subnet
+    lookup:
+      tags:
+        Name: prod-private-a
+```
+
+The planner generates Terraform `data` blocks for each existing resource and wires new resources to reference them:
+
+```hcl
+# --- Existing resources (data sources) ---
+
+data "aws_vpc" "main-vpc" {
+  id = "vpc-0abc1234"
+}
+
+data "aws_subnet" "app-subnet" {
+  id = "subnet-0def5678"
+}
+
+# --- Managed resources ---
+
+resource "aws_instance" "webserver" {
+  subnet_id              = data.aws_subnet.app-subnet.id
+  vpc_security_group_ids = [aws_security_group.webserver.id]
+  ...
+}
+```
+
+Data sources are read-only -- Terraform looks them up but never creates, updates, or destroys them. The intent agent will ask for the resource ID if you mention an existing resource without providing one.
+
+---
+
 ## What gets generated
 
 From a 5-component contract (API, database, cache, queue, worker), the planner generates ~38 AWS resources:
@@ -215,7 +271,7 @@ CI should gate on `human_reviewed: true` and zero errors before allowing `terraf
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests/ -v   # 96 tests, ~1s
+python -m pytest tests/ -v   # 108 tests, ~1s
 ```
 
 ### Test without hitting the API

@@ -16,6 +16,11 @@ class Provider(str, Enum):
     AZURE = "azure"
 
 
+class ResourceKind(str, Enum):
+    RESOURCE = "resource"  # managed resource — Terraform will create/update/destroy it
+    DATA = "data"          # data source — already exists, Terraform only reads it
+
+
 class ChangeAction(str, Enum):
     CREATE = "create"
     UPDATE = "update"
@@ -39,6 +44,7 @@ class Resource(BaseModel):
     type: str  # Terraform resource type, e.g. "aws_ecs_service"
     logical_name: str  # Terraform resource name, e.g. "api"
     component: str  # source contract component name
+    kind: ResourceKind = ResourceKind.RESOURCE  # managed resource or data source
     properties: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)  # resource ids
     tags: dict[str, str] = Field(default_factory=dict)

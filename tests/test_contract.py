@@ -9,6 +9,7 @@ from natural_iac.contract import (
     ComponentRequirements,
     ComponentRole,
     Constraints,
+    ExistingResource,
     InfraContract,
     Invariant,
     InvariantSeverity,
@@ -258,3 +259,64 @@ class TestInvariants:
         )
         result = validate_contract(c)
         assert not any(v.rule == "invariant.custom-rule" for v in result.violations)
+
+
+# ---------------------------------------------------------------------------
+# Existing resources (brownfield)
+# ---------------------------------------------------------------------------
+
+
+class TestExistingResources:
+    def test_existing_resource_by_id(self):
+        er = ExistingResource(
+            name="main-vpc",
+            type="aws_vpc",
+            lookup={"id": "vpc-0abc1234"},
+            description="Prod VPC",
+        )
+        assert er.name == "main-vpc"
+        assert er.lookup == {"id": "vpc-0abc1234"}
+
+    def test_existing_resource_by_tag_filter(self):
+        er = ExistingResource(
+            name="app-subnet",
+            type="aws_subnet",
+            lookup={"tags": {"Name": "prod-private-a"}},
+        )
+        assert er.lookup["tags"]["Name"] == "prod-private-a"
+
+    def test_contract_with_existing_resources_round_trips_yaml(self):
+        contract = InfraContract(
+            name="brownfield-app",
+            components=[Component(name="api", role=ComponentRole.WEB_API)],
+            existing_resources=[
+                ExistingResource(
+                    name="main-vpc",
+                    type="aws_vpc",
+                    lookup={"id": "vpc-0abc1234"},
+                ),
+                ExistingResource(
+                    name="app-subnet",
+                    type="aws_subnet",
+                    lookup={"id": "subnet-0def5678"},
+                ),
+            ],
+        )
+        yaml_str = contract_to_yaml(contract)
+        restored = contract_from_yaml(yaml_str)
+        assert len(restored.existing_resources) == 2
+        assert restored.existing_resources[0].name == "main-vpc"
+        assert restored.existing_resources[0].type == "aws_vpc"
+        assert restored.existing_resources[1].lookup == {"id": "subnet-0def5678"}
+
+    def test_contract_without_existing_resources_defaults_to_empty_list(self):
+        c = make_contract()
+        assert c.existing_resources == []
+
+    def test_existing_resource_name_must_be_slug(self):
+        with pytest.raises(Exception):
+            ExistingResource(
+                name="My VPC",  # spaces not allowed
+                type="aws_vpc",
+                lookup={"id": "vpc-0abc1234"},
+            )

@@ -78,6 +78,36 @@ machine-checked at every plan:
 Use lowercase snake_case or kebab-case. Be descriptive but brief:
   api, db, cache, jobs, workers, cdn, queue
 
+## Existing resources (brownfield)
+
+When the user says they have existing infrastructure they want to reuse
+(e.g. "use my existing VPC", "deploy into subnet-123", "use our shared
+network"), capture those in the `existing_resources` section rather than
+as contract components. These will become Terraform data sources that new
+resources reference without Terraform trying to manage them.
+
+Format:
+  existing_resources:
+    - name: main_vpc          # lowercase slug used for referencing
+      type: aws_vpc           # Terraform data source type
+      lookup:
+        id: vpc-0abc1234      # exact resource ID (preferred)
+      description: "Existing prod VPC"
+    - name: app_subnet
+      type: aws_subnet
+      lookup:
+        id: subnet-0def5678
+
+Rules:
+- Only add to existing_resources for things the user says already exist.
+- Do NOT add a network component if the user provides an existing VPC/subnet.
+- If the user mentions an existing resource but gives no ID, ask for it
+  (this is worth a clarification question -- the ID is required).
+- Use tag-based lookup only if the user provides tag values and no ID:
+    lookup:
+      tags:
+        Name: prod-vpc
+
 ## What makes a good contract
 
 - Complete: captures all the components needed for the described system

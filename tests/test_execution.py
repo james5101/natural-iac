@@ -30,6 +30,7 @@ from natural_iac.planner.schema import (
     Provider,
     Resource,
     ResourceChange,
+    ResourceKind,
 )
 
 
@@ -271,6 +272,64 @@ class TestRenderer:
         hcl = render_plan(plan)["main.tf"]
         assert "environment = {" in hcl
         assert '"KEY"' in hcl or "KEY" in hcl
+
+    def test_data_source_renders_data_block(self):
+        data_res = Resource(
+            id="aws_vpc.main-vpc",
+            type="aws_vpc",
+            logical_name="main-vpc",
+            component="shared",
+            kind=ResourceKind.DATA,
+            properties={"id": "vpc-0abc1234"},
+        )
+        plan = make_plan([data_res])
+        hcl = render_plan(plan)["main.tf"]
+        assert 'data "aws_vpc" "main-vpc"' in hcl
+        assert 'resource "aws_vpc"' not in hcl
+        assert 'id = "vpc-0abc1234"' in hcl
+
+    def test_data_source_has_no_tags_block(self):
+        data_res = Resource(
+            id="aws_vpc.main-vpc",
+            type="aws_vpc",
+            logical_name="main-vpc",
+            component="shared",
+            kind=ResourceKind.DATA,
+            properties={"id": "vpc-0abc1234"},
+            tags={"managed_by": "natural-iac"},  # should be ignored for data sources
+        )
+        plan = make_plan([data_res])
+        hcl = render_plan(plan)["main.tf"]
+        assert "tags" not in hcl
+
+    def test_data_sources_rendered_before_managed_resources(self):
+        data_res = Resource(
+            id="aws_vpc.main-vpc",
+            type="aws_vpc",
+            logical_name="main-vpc",
+            component="shared",
+            kind=ResourceKind.DATA,
+            properties={"id": "vpc-0abc1234"},
+        )
+        managed_res = make_resource(
+            "aws_instance", "webserver",
+            vpc_security_group_ids="${data.aws_vpc.main-vpc.id}",
+        )
+        plan = make_plan([managed_res, data_res])  # deliberately reversed order
+        hcl = render_plan(plan)["main.tf"]
+        data_pos = hcl.index('data "aws_vpc"')
+        resource_pos = hcl.index('resource "aws_instance"')
+        assert data_pos < resource_pos
+
+    def test_data_source_reference_renders_as_tf_expression(self):
+        managed_res = make_resource(
+            "aws_instance", "webserver",
+            subnet_id="${data.aws_subnet.app_subnet.id}",
+        )
+        plan = make_plan([managed_res])
+        hcl = render_plan(plan)["main.tf"]
+        assert "subnet_id = data.aws_subnet.app_subnet.id" in hcl
+        assert 'subnet_id = "data.aws_subnet' not in hcl
 
 
 # ---------------------------------------------------------------------------

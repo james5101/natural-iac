@@ -25,7 +25,7 @@ from natural_iac.planner import (
     Resource,
     estimate_cost,
 )
-from natural_iac.planner.schema import CostLineItem
+from natural_iac.planner.schema import CostLineItem, ResourceKind
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +269,73 @@ class TestPlannerAgent:
 
         ecs_service = plan.resource_map["aws_ecs_service.api"]
         assert "aws_ecs_cluster.main" in ecs_service.depends_on
+
+    @pytest.mark.asyncio
+    async def test_data_sources_excluded_from_changes(self, agent, mock_client):
+        payload = {
+            "region": "us-east-1",
+            "resources": [
+                {
+                    "type": "aws_vpc",
+                    "logical_name": "main-vpc",
+                    "component": "shared",
+                    "kind": "data",
+                    "properties": {"id": "vpc-0abc1234"},
+                },
+                {
+                    "type": "aws_instance",
+                    "logical_name": "webserver",
+                    "component": "api",
+                    "kind": "resource",
+                    "properties": {"instance_type": "t3.small"},
+                },
+            ],
+        }
+        mock_client.messages.create.return_value = _api_response(
+            _tool_use_block("emit_plan", payload)
+        )
+
+        plan, _ = await agent.plan(make_contract())
+
+        assert len(plan.resources) == 2
+        assert len(plan.changes) == 1  # only the managed resource
+        assert plan.changes[0].resource_id == "aws_instance.webserver"
+
+    @pytest.mark.asyncio
+    async def test_data_sources_have_no_managed_by_tags(self, agent, mock_client):
+        payload = {
+            "region": "us-east-1",
+            "resources": [
+                {
+                    "type": "aws_vpc",
+                    "logical_name": "main-vpc",
+                    "component": "shared",
+                    "kind": "data",
+                    "properties": {"id": "vpc-0abc1234"},
+                },
+            ],
+        }
+        mock_client.messages.create.return_value = _api_response(
+            _tool_use_block("emit_plan", payload)
+        )
+
+        plan, _ = await agent.plan(make_contract())
+
+        vpc_data = plan.resource_map["aws_vpc.main-vpc"]
+        assert vpc_data.kind == ResourceKind.DATA
+        assert "managed_by" not in vpc_data.tags
+        assert vpc_data.tags == {}
+
+    @pytest.mark.asyncio
+    async def test_managed_resources_default_to_resource_kind(self, agent, mock_client):
+        mock_client.messages.create.return_value = _api_response(
+            _tool_use_block("emit_plan", _minimal_plan_payload())
+        )
+
+        plan, _ = await agent.plan(make_contract())
+
+        for r in plan.resources:
+            assert r.kind == ResourceKind.RESOURCE
 
 
 # ---------------------------------------------------------------------------

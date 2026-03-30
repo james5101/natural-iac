@@ -165,6 +165,26 @@ class Invariant(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Existing resources — brownfield / pre-existing infrastructure
+# ---------------------------------------------------------------------------
+
+class ExistingResource(BaseModel):
+    """A cloud resource that already exists and should be referenced, not created.
+
+    The planner emits a Terraform data source for each existing resource so
+    new resources can reference it (e.g. deploy an EC2 instance into an
+    existing VPC and subnet).
+
+    ``lookup`` contains the filter attributes for the data source, most
+    commonly ``{"id": "vpc-0abc1234"}`` or ``{"tags": {"Name": "prod-vpc"}}``.
+    """
+    name: str = Field(..., pattern=r"^[a-z][a-z0-9_-]*$")
+    type: str  # Terraform data source type, e.g. "aws_vpc", "aws_subnet"
+    lookup: dict[str, Any]
+    description: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Top-level contract
 # ---------------------------------------------------------------------------
 
@@ -176,6 +196,8 @@ class InfraContract(BaseModel):
     # CI gates on this flag before allow apply
     human_reviewed: bool = False
     components: list[Component] = Field(..., min_length=1)
+    # Pre-existing infrastructure to reference (not create) — brownfield support
+    existing_resources: list[ExistingResource] = Field(default_factory=list)
     constraints: Constraints = Field(default_factory=Constraints)
     invariants: list[Invariant] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

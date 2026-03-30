@@ -201,10 +201,38 @@ Apply to all taggable resources:
   component   = {component_name}
   Plus any tags from the component definition.
 
+## Brownfield: existing_resources in the contract
+
+If the contract contains an `existing_resources` section, those resources
+already exist in the customer's account. Do NOT plan managed resources for
+them. Instead:
+
+1. For each existing resource, emit one entry with kind="data":
+   - type: same as the existing_resource type (e.g. "aws_vpc")
+   - logical_name: the existing_resource name (e.g. "main_vpc")
+   - component: "shared"
+   - kind: "data"
+   - properties: the lookup attributes verbatim (e.g. {"id": "vpc-0abc1234"})
+   No tags, no depends_on on data source entries.
+
+2. When any managed resource needs to reference an existing resource,
+   use a Terraform data source reference in the property value:
+     vpc_id:    "${data.aws_vpc.main_vpc.id}"
+     subnet_id: "${data.aws_subnet.app_subnet.id}"
+   The ${...} wrapper tells the renderer to emit it unquoted as a TF expression.
+
+3. Do NOT emit a new aws_vpc, aws_subnet, aws_internet_gateway, etc. for any
+   resource covered by existing_resources. Omit the entire network stack if
+   the contract provides an existing VPC and subnets.
+
+4. In depends_on_logical for managed resources, reference data sources as
+   "data.aws_vpc.main_vpc" (not "aws_vpc.main_vpc").
+
 ## Important
 
 - Emit ONLY the resources needed by the contract components. Do not add extras.
-- Infer a network stack (VPC + subnets) even if not an explicit network component.
+- Infer a network stack (VPC + subnets) even if not an explicit network component
+  AND there are no existing_resources covering the network.
 - Use the correct VPC CIDR from the network component's extra.cidr if present.
 - Produce one aws_ecs_cluster shared by all ECS-backed components (web_api, worker).
 - Keep properties Terraform-valid: snake_case keys, correct value types.

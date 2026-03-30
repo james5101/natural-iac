@@ -23,6 +23,7 @@ from .schema import (
     Provider,
     Resource,
     ResourceChange,
+    ResourceKind,
 )
 
 DEFAULT_MODEL = "claude-opus-4-6"
@@ -78,6 +79,15 @@ def _emit_plan_tool() -> dict:
                             "component": {
                                 "type": "string",
                                 "description": "Contract component name this resource implements, or 'shared' for shared infra.",
+                            },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["resource", "data"],
+                                "description": (
+                                    "Use 'data' for existing resources from the contract's "
+                                    "existing_resources list (Terraform data sources). "
+                                    "Use 'resource' (default) for all managed resources being created."
+                                ),
                             },
                             "properties": {
                                 "type": "object",
@@ -216,40 +226,49 @@ def _build_plan(
         rtype = raw["type"]
         lname = raw["logical_name"]
         rid = Resource.make_id(rtype, lname)
+        kind = ResourceKind(raw.get("kind", "resource"))
 
         # Resolve depends_on from logical ids to canonical ids
         depends_on_logical: list[str] = raw.get("depends_on_logical", [])
         # IDs are already in "{type}.{logical_name}" form — pass through
         depends_on = [d for d in depends_on_logical if d]
 
-        # Merge contract-level tags + component tags + managed-by tag
         component_name = raw.get("component", "shared")
-        base_tags = {
-            "managed_by": "natural-iac",
-            "contract": contract.name,
-            "component": component_name,
-        }
-        component = next(
-            (c for c in contract.components if c.name == component_name), None
-        )
-        if component:
-            base_tags.update(component.tags)
-        base_tags.update(raw.get("tags") or {})
+
+        # Data sources are read-only lookups — no managed_by tags
+        if kind == ResourceKind.DATA:
+            tags: dict[str, str] = {}
+        else:
+            base_tags = {
+                "managed_by": "natural-iac",
+                "contract": contract.name,
+                "component": component_name,
+            }
+            component = next(
+                (c for c in contract.components if c.name == component_name), None
+            )
+            if component:
+                base_tags.update(component.tags)
+            base_tags.update(raw.get("tags") or {})
+            tags = base_tags
 
         resources.append(Resource(
             id=rid,
             type=rtype,
             logical_name=lname,
             component=component_name,
+            kind=kind,
             properties=raw.get("properties", {}),
             depends_on=depends_on,
-            tags=base_tags,
+            tags=tags,
         ))
 
-    # For v1: no state, so every resource is a CREATE
+    # For v1: no state, so every managed resource is a CREATE.
+    # Data sources are not changes — they already exist.
     changes = [
         ResourceChange(resource_id=r.id, action=ChangeAction.CREATE)
         for r in resources
+        if r.kind == ResourceKind.RESOURCE
     ]
 
     return ExecutionPlan(

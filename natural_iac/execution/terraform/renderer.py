@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ...planner.schema import ExecutionPlan, Resource
+from ...planner.schema import ExecutionPlan, Resource, ResourceKind
 
 # Terraform AWS provider version pin
 _AWS_PROVIDER_VERSION = "~> 5.0"
@@ -81,9 +81,25 @@ def _render_main(plan: ExecutionPlan) -> str:
         f'# Plan ID: {plan.id}',
         '',
     ]
-    for resource in plan.resources:
-        blocks.append(_render_resource(resource))
+
+    data_sources = [r for r in plan.resources if r.kind == ResourceKind.DATA]
+    managed = [r for r in plan.resources if r.kind == ResourceKind.RESOURCE]
+
+    # Data sources first so managed resources can reference them
+    if data_sources:
+        blocks.append('# --- Existing resources (data sources) ---')
         blocks.append('')
+        for resource in data_sources:
+            blocks.append(_render_data_source(resource))
+            blocks.append('')
+
+    if managed:
+        blocks.append('# --- Managed resources ---')
+        blocks.append('')
+        for resource in managed:
+            blocks.append(_render_resource(resource))
+            blocks.append('')
+
     return "\n".join(blocks)
 
 
@@ -120,6 +136,20 @@ def _render_resource(resource: Resource) -> str:
         refs = ", ".join(resource.depends_on)
         lines.append(f"  depends_on = [{refs}]")
 
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _render_data_source(resource: Resource) -> str:
+    """Render a Terraform data source block: data "type" "name" { ... }
+
+    Data sources look up existing resources. They have no tags and no
+    depends_on — they are read-only references to pre-existing infra.
+    """
+    lines = [f'data "{resource.type}" "{resource.logical_name}" {{']
+    for key, value in resource.properties.items():
+        rendered = _hcl_value(value, indent=1)
+        lines.append(f"  {key} = {rendered}")
     lines.append("}")
     return "\n".join(lines)
 
