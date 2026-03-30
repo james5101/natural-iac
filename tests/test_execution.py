@@ -21,6 +21,7 @@ from natural_iac.execution.terraform.backend import (
 )
 from natural_iac.execution.terraform.renderer import (
     _hcl_value,
+    _render_block_attr,
     render_plan,
     render_to_dir,
 )
@@ -330,6 +331,93 @@ class TestRenderer:
         hcl = render_plan(plan)["main.tf"]
         assert "subnet_id = data.aws_subnet.app_subnet.id" in hcl
         assert 'subnet_id = "data.aws_subnet' not in hcl
+
+
+# ---------------------------------------------------------------------------
+# Block syntax rendering
+# ---------------------------------------------------------------------------
+
+
+class TestBlockSyntax:
+    def test_security_group_ingress_rendered_as_block(self):
+        sg = make_resource(
+            "aws_security_group", "api",
+            ingress=[{"from_port": 80, "to_port": 80, "protocol": "tcp", "cidr_blocks": ["0.0.0.0/0"]}],
+            egress=[{"from_port": 0, "to_port": 0, "protocol": "-1", "cidr_blocks": ["0.0.0.0/0"]}],
+        )
+        plan = make_plan([sg])
+        hcl = render_plan(plan)["main.tf"]
+        # Block syntax: no = before the brace
+        assert "  ingress {" in hcl
+        assert "  egress {" in hcl
+        # Must NOT appear as assignment
+        assert "ingress = [" not in hcl
+        assert "egress = [" not in hcl
+        # Inner attrs are still assignments
+        assert "from_port = 80" in hcl
+
+    def test_ecs_service_network_configuration_rendered_as_block(self):
+        svc = make_resource(
+            "aws_ecs_service", "api",
+            network_configuration={
+                "subnets": ["${data.aws_subnet.app.id}"],
+                "security_groups": ["${aws_security_group.api.id}"],
+                "assign_public_ip": False,
+            },
+        )
+        plan = make_plan([svc])
+        hcl = render_plan(plan)["main.tf"]
+        assert "  network_configuration {" in hcl
+        assert "network_configuration = {" not in hcl
+        assert "assign_public_ip = false" in hcl
+
+    def test_non_block_resource_renders_normally(self):
+        r = make_resource("aws_s3_bucket", "assets", bucket="my-bucket")
+        plan = make_plan([r])
+        hcl = render_plan(plan)["main.tf"]
+        assert 'bucket = "my-bucket"' in hcl
+
+    def test_render_block_attr_list_of_dicts(self):
+        lines = _render_block_attr("ingress", [{"from_port": 443, "protocol": "tcp"}], indent=1)
+        joined = "\n".join(lines)
+        assert "  ingress {" in joined
+        assert "    from_port = 443" in joined
+        assert "  }" in joined
+
+    def test_render_block_attr_single_dict(self):
+        lines = _render_block_attr("network_configuration", {"subnets": ["s-1"]}, indent=1)
+        joined = "\n".join(lines)
+        assert "  network_configuration {" in joined
+        assert '    subnets = ["s-1"]' in joined
+
+    def test_render_block_attr_empty_list(self):
+        lines = _render_block_attr("ingress", [], indent=1)
+        assert lines == []
+
+
+class TestNoTagsResources:
+    def test_iam_role_policy_attachment_has_no_tags_block(self):
+        r = make_resource(
+            "aws_iam_role_policy_attachment", "api-policy",
+            tags={"ManagedBy": "natural-iac"},
+            role="my-role",
+            policy_arn="arn:aws:iam::aws:policy/ReadOnly",
+        )
+        plan = make_plan([r])
+        hcl = render_plan(plan)["main.tf"]
+        assert "tags" not in hcl
+
+    def test_taggable_resource_still_gets_tags(self):
+        r = make_resource(
+            "aws_instance", "web",
+            tags={"Env": "prod"},
+            ami="ami-123",
+            instance_type="t3.micro",
+        )
+        plan = make_plan([r])
+        hcl = render_plan(plan)["main.tf"]
+        assert "tags" in hcl
+        assert '"Env"' in hcl or "Env" in hcl
 
 
 # ---------------------------------------------------------------------------

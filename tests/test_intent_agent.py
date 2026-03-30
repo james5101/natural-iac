@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from natural_iac.contract.schema import ComponentRole
+from natural_iac.conventions.schema import ConventionProfile, NamingConfig, TagConfig
 from natural_iac.intent import IntentAgent
+from natural_iac.intent.prompts import build_conventions_section
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +268,104 @@ class TestClarificationLoop:
             if isinstance(t.content, str) and "forcing emit" in t.content
         ]
         assert len(forcing_turns) == 1
+
+
+# ---------------------------------------------------------------------------
+# Convention injection
+# ---------------------------------------------------------------------------
+
+
+class TestConventionInjection:
+    def _profile(self, naming=None, tags=None) -> ConventionProfile:
+        return ConventionProfile(
+            naming=naming or NamingConfig(),
+            tags=tags or TagConfig(),
+        )
+
+    def test_naming_variables_appear_in_section(self):
+        profile = self._profile(
+            naming=NamingConfig(
+                pattern="{env}-{component}-{type_short}",
+                variables={"env": "dev"},
+            )
+        )
+        section = build_conventions_section(profile)
+        assert "env" in section
+        assert "dev" in section
+        assert "metadata" in section
+
+    def test_required_tags_covered_by_defaults_listed_as_covered(self):
+        profile = self._profile(
+            tags=TagConfig(
+                required=["CostCenter", "ManagedBy"],
+                defaults={"CostCenter": "platform-eng", "ManagedBy": "natural-iac"},
+            )
+        )
+        section = build_conventions_section(profile)
+        assert "covered by defaults" in section
+        assert "CostCenter" in section
+        assert "Do NOT ask" in section
+
+    def test_required_tags_without_defaults_flagged_as_missing(self):
+        profile = self._profile(
+            tags=TagConfig(
+                required=["Team"],
+                defaults={},
+            )
+        )
+        section = build_conventions_section(profile)
+        assert "Team" in section
+        assert "NO default" in section
+        assert "metadata" in section
+
+    def test_tag_with_variable_placeholder_noted(self):
+        profile = self._profile(
+            tags=TagConfig(
+                required=["Environment"],
+                defaults={"Environment": "${env}"},
+            )
+        )
+        section = build_conventions_section(profile)
+        assert "Environment" in section
+        assert "${env}" in section
+
+    def test_empty_conventions_returns_section_header_only(self):
+        profile = self._profile()
+        section = build_conventions_section(profile)
+        assert "## Org conventions" in section
+        # No variable or tag noise
+        assert "metadata" not in section
+        assert "NO default" not in section
+
+    @pytest.mark.asyncio
+    async def test_conventions_injected_into_system_prompt(self, agent, mock_client):
+        profile = self._profile(
+            naming=NamingConfig(variables={"env": "prod"}),
+            tags=TagConfig(required=["Team"], defaults={}),
+        )
+        mock_client.messages.create.return_value = _api_response(
+            _tool_use_block("emit_contract", _minimal_contract_payload())
+        )
+
+        await agent.parse("I need a web API", conventions=profile)
+
+        call_kwargs = mock_client.messages.create.call_args
+        system_prompt = call_kwargs.kwargs.get("system") or call_kwargs.args[0]
+        assert "## Org conventions" in system_prompt
+        assert "env" in system_prompt
+        assert "Team" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_no_conventions_omits_section(self, agent, mock_client):
+        mock_client.messages.create.return_value = _api_response(
+            _tool_use_block("emit_contract", _minimal_contract_payload())
+        )
+
+        await agent.parse("I need a web API", conventions=None)
+
+        call_kwargs = mock_client.messages.create.call_args
+        system_prompt = call_kwargs.kwargs.get("system") or call_kwargs.args[0]
+        assert "## Org conventions" not in system_prompt
 
 
 # ---------------------------------------------------------------------------

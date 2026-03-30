@@ -14,13 +14,16 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import anthropic
 
 from ..contract.schema import InfraContract, SchemaVersion
 from ..contract.validator import ValidationResult, validate_contract
-from .prompts import CLARIFICATION_GUIDANCE, SYSTEM_PROMPT
+from .prompts import CLARIFICATION_GUIDANCE, SYSTEM_PROMPT, build_conventions_section
+
+if TYPE_CHECKING:
+    from ..conventions.schema import ConventionProfile
 
 # Default model — fast enough for interactive use, capable enough for planning
 DEFAULT_MODEL = "claude-opus-4-6"
@@ -135,6 +138,7 @@ class IntentAgent:
         self,
         intent: str,
         clarification_callback: Callable[[str], Awaitable[str]] | None = None,
+        conventions: "ConventionProfile | None" = None,
     ) -> IntentResult:
         """Convert a natural-language intent string into a validated InfraContract.
 
@@ -146,7 +150,14 @@ class IntentAgent:
             Async callable that receives a question string and returns the user's
             answer. If None, clarification questions are skipped and the agent
             emits a best-effort contract from the original intent alone.
+        conventions:
+            Optional org ConventionProfile. When provided, injects required-tag
+            and naming-variable context so the agent captures the right metadata.
         """
+        base_system = SYSTEM_PROMPT
+        if conventions is not None:
+            base_system += build_conventions_section(conventions)
+
         trace = IntentTrace(intent=intent)
         messages: list[dict] = [{"role": "user", "content": intent}]
         trace.turns.append(Turn(role="user", content=intent))
@@ -154,9 +165,11 @@ class IntentAgent:
         clarifications_used = 0
 
         while True:
-            system = SYSTEM_PROMPT
+            system = base_system
             if clarification_callback is None:
                 system += "\n\nIMPORTANT: Do not ask clarifying questions. Emit the best contract you can from the information given."
+            else:
+                system += CLARIFICATION_GUIDANCE
 
             response = await self.client.messages.create(
                 model=self.model,

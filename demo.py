@@ -77,7 +77,7 @@ async def run(key: str) -> None:
         return input("  Your answer: ")
 
     print("Calling Claude (intent agent)...")
-    intent_result = await intent_agent.parse(INTENT, clarification_callback=clarification_callback)
+    intent_result = await intent_agent.parse(INTENT, clarification_callback=clarification_callback, conventions=conventions)
 
     print(f"\nContract name : {intent_result.contract.name}")
     print(f"Components    : {[c.name for c in intent_result.contract.components]}")

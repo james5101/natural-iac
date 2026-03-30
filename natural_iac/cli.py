@@ -70,6 +70,7 @@ def parse(
 ) -> None:
     """Parse natural language intent into an infrastructure contract."""
     api_key = _require_api_key()
+    conventions = _load_conventions()
     client = anthropic.AsyncAnthropic(api_key=api_key)
     agent = IntentAgent(client=client, model=model)
 
@@ -83,7 +84,7 @@ def parse(
         callback = None if no_interactive else clarification_callback
 
         console.print("[dim]-> Parsing intent...[/dim]")
-        return await agent.parse(intent, clarification_callback=callback)
+        return await agent.parse(intent, clarification_callback=callback, conventions=conventions)
 
     try:
         result = asyncio.run(run())

@@ -209,7 +209,7 @@ def _build_user_message(
     ]
 
     if conventions is not None:
-        lines += ["", _build_conventions_section(conventions, module_vars or {})]
+        lines += ["", _build_conventions_section(conventions, module_vars or {}, contract.metadata)]
 
     return "\n".join(lines)
 
@@ -217,6 +217,7 @@ def _build_user_message(
 def _build_conventions_section(
     conventions: "ConventionProfile",
     module_vars: "dict[str, list]",
+    contract_metadata: "dict[str, Any] | None" = None,
 ) -> str:
     """Render the conventions as an instruction block appended to the user message."""
     from ..conventions.module_reader import format_variables_for_prompt
@@ -238,7 +239,11 @@ def _build_conventions_section(
         )
         parts.append("")
 
-    tag_defaults = conventions.tags.resolve_defaults(naming.variables)
+    # Resolve tag defaults: naming variable defaults + flat contract metadata values
+    meta_vars = {**naming.variables}
+    if contract_metadata:
+        meta_vars.update({k: str(v) for k, v in contract_metadata.items() if isinstance(v, str)})
+    tag_defaults = conventions.tags.resolve_defaults(meta_vars)
     if tag_defaults:
         parts.append("### Required tags on all resources:")
         for k, v in tag_defaults.items():
@@ -312,12 +317,18 @@ def _build_plan(
     region = data.get("region") or _infer_region(contract)
     raw_resources: list[dict] = data.get("resources", [])
 
-    # Pre-compute convention tag defaults once (avoids repeated resolution)
+    # Pre-compute convention tag defaults once (avoids repeated resolution).
+    # Merge naming variable defaults with flat values from contract.metadata so
+    # that user-captured values (e.g. env=dev stored by the intent agent) resolve
+    # ${var} placeholders in tag defaults.  Contract metadata wins on conflict.
     convention_tag_defaults: dict[str, str] = {}
     if conventions is not None:
-        convention_tag_defaults = conventions.tags.resolve_defaults(
-            conventions.naming.variables
+        naming_vars = {**conventions.naming.variables}
+        # Only pull flat string values from metadata — skip nested dicts (e.g. tags)
+        naming_vars.update(
+            {k: str(v) for k, v in contract.metadata.items() if isinstance(v, str)}
         )
+        convention_tag_defaults = conventions.tags.resolve_defaults(naming_vars)
 
     resources: list[Resource] = []
     for raw in raw_resources:
@@ -328,12 +339,13 @@ def _build_plan(
         component_name = raw.get("component", "shared")
 
         # Post-process logical_name using naming convention (safety net over LLM output).
-        # Only fires when naming is explicitly configured (has variables or type_short_map),
-        # and only for non-shared managed resources.
+        # Only fires for resource types explicitly listed in type_short_map — this
+        # prevents smashing the LLM's differentiated names (e.g. execution-role vs
+        # task-role) when multiple resources of the same type serve one component.
         naming = conventions.naming if conventions is not None else None
         if (
             naming is not None
-            and (naming.variables or naming.type_short_map)
+            and rtype in naming.type_short_map
             and kind == ResourceKind.RESOURCE
             and component_name != "shared"
         ):

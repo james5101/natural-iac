@@ -27,6 +27,38 @@ if TYPE_CHECKING:
 # Terraform AWS provider version pin
 _AWS_PROVIDER_VERSION = "~> 5.0"
 
+# ---------------------------------------------------------------------------
+# Block-syntax registry
+# ---------------------------------------------------------------------------
+# Attributes in this registry must be rendered as HCL blocks (no = sign).
+# A list value produces one block per item; a dict value produces one block.
+# All other attributes are rendered as key = value assignments.
+_BLOCK_ATTRS: dict[str, set[str]] = {
+    "aws_security_group": {"ingress", "egress"},
+    "aws_ecs_service": {"network_configuration"},
+    "aws_lb": {"access_logs"},
+    "aws_lb_listener": {"default_action"},
+    "aws_lb_target_group": {"health_check", "stickiness"},
+    "aws_cloudfront_distribution": {"origin", "default_cache_behavior", "restrictions", "viewer_certificate"},
+    "aws_msk_cluster": {"broker_node_group_info", "encryption_info", "client_authentication"},
+    "aws_elasticache_replication_group": {"log_delivery_configuration"},
+}
+
+# Resource types that do not support a tags argument in the AWS provider.
+_NO_TAGS_RESOURCE_TYPES: frozenset[str] = frozenset({
+    "aws_iam_role_policy_attachment",
+    "aws_iam_policy_attachment",
+    "aws_route_table_association",
+    "aws_lb_target_group_attachment",
+    "aws_volume_attachment",
+    "aws_s3_bucket_versioning",
+    "aws_s3_bucket_server_side_encryption_configuration",
+    "aws_s3_bucket_public_access_block",
+    "aws_s3_bucket_acl",
+    "aws_cloudwatch_event_target",
+    "aws_ecs_task_definition",  # tags supported but container_definitions is JSON string
+})
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -141,20 +173,25 @@ def _render_resource(resource: Resource) -> str:
     props = {k: v for k, v in resource.properties.items() if k != "tags"}
     prop_tags: dict[str, str] = resource.properties.get("tags", {})
 
-    # Render scalar/map/list properties
-    for key, value in props.items():
-        rendered = _hcl_value(value, indent=1)
-        lines.append(f"  {key} = {rendered}")
+    block_attrs = _BLOCK_ATTRS.get(resource.type, set())
 
-    # Merged tags: Resource.tags wins over any tags in properties
-    merged_tags = {**prop_tags, **resource.tags}
-    if merged_tags:
-        if props:  # blank line before tags if there were other properties
-            lines.append("")
-        lines.append("  tags = {")
-        for k, v in sorted(merged_tags.items()):
-            lines.append(f'    {k} = "{v}"')
-        lines.append("  }")
+    for key, value in props.items():
+        if key in block_attrs:
+            lines.extend(_render_block_attr(key, value, indent=1))
+        else:
+            rendered = _hcl_value(value, indent=1)
+            lines.append(f"  {key} = {rendered}")
+
+    # Tags: skip for resource types that don't support them
+    if resource.type not in _NO_TAGS_RESOURCE_TYPES:
+        merged_tags = {**prop_tags, **resource.tags}
+        if merged_tags:
+            if props:
+                lines.append("")
+            lines.append("  tags = {")
+            for k, v in sorted(merged_tags.items()):
+                lines.append(f'    {k} = "{v}"')
+            lines.append("  }")
 
     # depends_on - rendered as resource references, not quoted strings
     if resource.depends_on:
@@ -269,6 +306,46 @@ def _render_data_source(resource: Resource) -> str:
         lines.append(f"  {key} = {rendered}")
     lines.append("}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Block-syntax rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_block_attr(key: str, value: Any, indent: int) -> list[str]:
+    """Render an attribute as one or more HCL blocks (no = sign).
+
+    A list of dicts becomes one block per item.
+    A single dict becomes one block.
+    Anything else falls back to regular key = value rendering.
+    """
+    pad = "  " * indent
+
+    def _render_single_block(body: dict) -> list[str]:
+        block_lines = [f"{pad}{key} {{"]
+        for k, v in body.items():
+            block_lines.append(f"{pad}  {k} = {_hcl_value(v, indent + 1)}")
+        block_lines.append(f"{pad}}}")
+        return block_lines
+
+    if isinstance(value, list):
+        if not value:
+            return []
+        lines: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                lines.extend(_render_single_block(item))
+            else:
+                # Non-dict list item — fall back to assignment
+                lines.append(f"{pad}{key} = {_hcl_value(value, indent)}")
+                break
+        return lines
+    elif isinstance(value, dict):
+        return _render_single_block(value)
+    else:
+        # Not a block-able value — fall back
+        return [f"{pad}{key} = {_hcl_value(value, indent)}"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,12 @@
 """System prompt and role documentation for the intent agent."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..conventions.schema import ConventionProfile
+
 SYSTEM_PROMPT = """\
 You are an infrastructure architect assistant that converts natural language
 descriptions of infrastructure needs into structured, provider-agnostic
@@ -126,3 +133,77 @@ Frame it in terms of the decision it unlocks, not in terms of the schema.
 Bad:  "What availability tier do you need?"
 Good: "Is this system customer-facing in production, or an internal / dev tool?"
 """
+
+
+def build_conventions_section(profile: "ConventionProfile") -> str:
+    """Build a system prompt section from an org ConventionProfile.
+
+    Tells the intent agent:
+    - What naming variables the org uses (e.g. env) so it captures them
+      in contract metadata for use in naming patterns and tag resolution.
+    - Which tags are required but not covered by defaults, so the agent
+      knows to infer or ask for their values.
+    - Which tags are already provided by defaults so the agent doesn't ask.
+    """
+    lines: list[str] = ["\n## Org conventions"]
+
+    # --- Naming variables ---
+    variables = profile.naming.variables
+    if variables:
+        var_names = list(variables.keys())
+        lines.append(
+            "\nThis org's naming convention uses the following variables that must "
+            "be resolved at plan time:"
+        )
+        for name, value in variables.items():
+            lines.append(f"  - {name}: (default: \"{value}\")")
+        lines.append(
+            f"\nCapture any of these that are clear from the intent in the contract's "
+            f"`metadata` field as a flat dict. IMPORTANT: use the EXACT variable name "
+            f"as the key — do not rename or expand it. Examples:\n"
+            + "\n".join(f"  metadata: {{\"{name}\": \"<value>\"}}" for name in var_names)
+        )
+        lines.append(
+            "If the value is not inferable from the intent and no default is listed, "
+            "this is worth a clarifying question."
+        )
+    elif profile.naming.type_short_map:
+        # Has type_short_map but no variables — pattern uses {component}/{type_short} only
+        # No action needed from the intent agent
+        pass
+
+    # --- Required tags ---
+    required_tags = profile.tags.required
+    defaults = profile.tags.defaults
+
+    if required_tags:
+        covered = set(defaults.keys())
+        # Tags whose default contains a ${var} placeholder need the variable resolved
+        needs_variable: list[str] = [
+            tag for tag, val in defaults.items()
+            if "${" in val and tag in required_tags
+        ]
+        truly_missing: list[str] = [t for t in required_tags if t not in covered]
+
+        if defaults:
+            covered_list = ", ".join(sorted(covered))
+            lines.append(f"\nRequired org tags already covered by defaults: {covered_list}.")
+            lines.append("Do NOT ask the user for these — they will be applied automatically.")
+
+        if needs_variable:
+            for tag in needs_variable:
+                val = defaults[tag]
+                lines.append(
+                    f"\nThe '{tag}' tag is set to \"{val}\" — its value depends on a "
+                    f"naming variable. Capture that variable in metadata (see above)."
+                )
+
+        if truly_missing:
+            lines.append(
+                f"\nRequired tags with NO default: {truly_missing}. "
+                "You must either infer the value from the intent or ask for it. "
+                "Store the value in contract metadata under `tags`, e.g.:\n"
+                "  metadata: {\"tags\": {\"Team\": \"payments\"}}"
+            )
+
+    return "\n".join(lines)
