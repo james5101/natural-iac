@@ -25,6 +25,7 @@ from rich.text import Text
 
 from .contract import contract_to_yaml, load_contract, validate_contract
 from .contract.validator import Severity
+from .conventions import ConventionProfile
 from .execution.terraform.renderer import render_plan, render_to_dir
 from .intent import IntentAgent
 from .planner import PlannerAgent
@@ -132,8 +133,9 @@ def validate(
         err_console.print(f"[red]Schema error:[/red] {e}")
         raise typer.Exit(1)
 
+    conventions = _load_conventions()
     console.print(f"\n[bold]Contract:[/bold] {contract.name}  [dim]({len(contract.components)} components)[/dim]\n")
-    result = validate_contract(contract)
+    result = validate_contract(contract, conventions=conventions)
     _print_validation(result)
 
     if not result.passed or (strict and result.warnings):
@@ -162,10 +164,12 @@ def plan(
         err_console.print(f"[red]Schema error:[/red] {e}")
         raise typer.Exit(1)
 
+    conventions = _load_conventions()
+
     console.print(f"\n[bold]Contract:[/bold] {contract.name}  [dim]({len(contract.components)} components)[/dim]")
 
     # Validate first - block on errors
-    validation = validate_contract(contract)
+    validation = validate_contract(contract, conventions=conventions)
     _print_validation(validation)
     if not validation.passed:
         raise typer.Exit(1)
@@ -176,7 +180,7 @@ def plan(
 
     async def run():
         console.print("\n[dim]-> Running planner...[/dim]")
-        return await agent.plan(contract)
+        return await agent.plan(contract, conventions=conventions)
 
     try:
         execution_plan, _trace = asyncio.run(run())
@@ -193,7 +197,7 @@ def plan(
     _print_changes(execution_plan)
 
     # HCL output
-    hcl_files = render_plan(execution_plan)
+    hcl_files = render_plan(execution_plan, conventions=conventions)
     console.print()
     for filename, content in hcl_files.items():
         console.print(Panel(
@@ -203,7 +207,7 @@ def plan(
         ))
 
     if render_dir:
-        written = render_to_dir(execution_plan, render_dir)
+        written = render_to_dir(execution_plan, render_dir, conventions=conventions)
         console.print(f"\n[dim]HCL written to {render_dir}/[/dim]")
         for p in written:
             console.print(f"  [dim]{p.name}[/dim]")
@@ -216,6 +220,14 @@ def plan(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _load_conventions() -> ConventionProfile | None:
+    """Load .niac/conventions.yaml from the current working directory, if present."""
+    profile = ConventionProfile.load()
+    if profile is not None:
+        console.print("[dim]Loaded conventions from .niac/conventions.yaml[/dim]")
+    return profile
 
 
 def _print_validation(result) -> None:

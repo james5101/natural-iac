@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anthropic
 
@@ -25,6 +25,9 @@ from .schema import (
     ResourceChange,
     ResourceKind,
 )
+
+if TYPE_CHECKING:
+    from ..conventions.schema import ConventionProfile
 
 DEFAULT_MODEL = "claude-opus-4-6"
 MAX_TOKENS = 16000
@@ -141,6 +144,7 @@ class PlannerAgent:
         self,
         contract: InfraContract,
         provider: Provider = Provider.AWS,
+        conventions: "ConventionProfile | None" = None,
     ) -> tuple[ExecutionPlan, PlannerTrace]:
         """Produce an ExecutionPlan for the given contract.
 
@@ -152,7 +156,7 @@ class PlannerAgent:
             Full conversation record for observability.
         """
         trace = PlannerTrace(contract_id=contract.id)
-        user_message = _build_user_message(contract)
+        user_message = _build_user_message(contract, conventions)
         messages: list[dict] = [{"role": "user", "content": user_message}]
         trace.turns.append({"role": "user", "content": user_message})
 
@@ -168,7 +172,7 @@ class PlannerAgent:
         trace.turns.append({"role": "assistant", "content": response.content})
 
         plan_data = _extract_plan_tool_call(response)
-        plan = _build_plan(plan_data, contract, provider)
+        plan = _build_plan(plan_data, contract, provider, conventions)
         plan.cost_estimate = estimate_cost(plan)
 
         return plan, trace
@@ -179,8 +183,11 @@ class PlannerAgent:
 # ---------------------------------------------------------------------------
 
 
-def _build_user_message(contract: InfraContract) -> str:
-    """Render the contract as a clear planning request."""
+def _build_user_message(
+    contract: InfraContract,
+    conventions: "ConventionProfile | None" = None,
+) -> str:
+    """Render the contract (and optional conventions) as a clear planning request."""
     from ..contract.serializer import contract_to_yaml
 
     lines = [
@@ -192,7 +199,60 @@ def _build_user_message(contract: InfraContract) -> str:
         "",
         "Apply all security constraints from the contract. Emit the complete resource graph.",
     ]
+
+    if conventions is not None:
+        lines += ["", _build_conventions_section(conventions)]
+
     return "\n".join(lines)
+
+
+def _build_conventions_section(conventions: "ConventionProfile") -> str:
+    """Render the conventions as an instruction block appended to the user message."""
+    parts = ["## Org conventions -- follow these exactly", ""]
+
+    naming = conventions.naming
+    if naming.pattern != "{component}-{type_short}" or naming.variables or naming.type_short_map:
+        parts.append(f"### Naming pattern: `{naming.pattern}`")
+        if naming.variables:
+            parts.append("Variables: " + ", ".join(f"{k}={v}" for k, v in naming.variables.items()))
+        if naming.type_short_map:
+            parts.append("Type short names:")
+            for rtype, short in naming.type_short_map.items():
+                parts.append(f"  {rtype} -> {short}")
+        parts.append(
+            "Apply this pattern to the logical_name of EVERY resource. "
+            "Use the component name from the contract for {component}."
+        )
+        parts.append("")
+
+    tag_defaults = conventions.tags.resolve_defaults(naming.variables)
+    if tag_defaults:
+        parts.append("### Required tags on all resources:")
+        for k, v in tag_defaults.items():
+            parts.append(f"  {k} = \"{v}\"")
+        parts.append("Include these in the tags object of every resource.")
+        parts.append("")
+
+    if conventions.modules:
+        parts.append("### Module overrides (use these instead of raw resource types):")
+        for mod in conventions.modules:
+            parts.append(f"  {mod.match} -> module source: {mod.source}")
+            parts.append(f"    name: {mod.name_template}")
+            if mod.input_map:
+                parts.append("    input_map: " + str(mod.input_map))
+        parts.append(
+            "Emit these resource types normally -- the renderer will convert them to "
+            "module blocks using the input_map. You do not need to change property names."
+        )
+        parts.append("")
+
+    if conventions.defaults.overrides:
+        parts.append("### Property defaults (applied after your output -- you may omit these):")
+        for rtype, props in conventions.defaults.overrides.items():
+            parts.append(f"  {rtype}: {props}")
+        parts.append("")
+
+    return "\n".join(parts)
 
 
 def _extract_plan_tool_call(response: anthropic.types.Message) -> dict[str, Any]:
@@ -216,34 +276,55 @@ def _build_plan(
     data: dict[str, Any],
     contract: InfraContract,
     provider: Provider,
+    conventions: "ConventionProfile | None" = None,
 ) -> ExecutionPlan:
     """Assemble an ExecutionPlan from the raw tool call payload."""
     region = data.get("region") or _infer_region(contract)
     raw_resources: list[dict] = data.get("resources", [])
 
+    # Pre-compute convention tag defaults once (avoids repeated resolution)
+    convention_tag_defaults: dict[str, str] = {}
+    if conventions is not None:
+        convention_tag_defaults = conventions.tags.resolve_defaults(
+            conventions.naming.variables
+        )
+
     resources: list[Resource] = []
     for raw in raw_resources:
         rtype = raw["type"]
         lname = raw["logical_name"]
-        rid = Resource.make_id(rtype, lname)
         kind = ResourceKind(raw.get("kind", "resource"))
-
-        # Resolve depends_on from logical ids to canonical ids
-        depends_on_logical: list[str] = raw.get("depends_on_logical", [])
-        # IDs are already in "{type}.{logical_name}" form — pass through
-        depends_on = [d for d in depends_on_logical if d]
 
         component_name = raw.get("component", "shared")
 
-        # Data sources are read-only lookups — no managed_by tags
+        # Post-process logical_name using naming convention (safety net over LLM output).
+        # Only fires when naming is explicitly configured (has variables or type_short_map),
+        # and only for non-shared managed resources.
+        naming = conventions.naming if conventions is not None else None
+        if (
+            naming is not None
+            and (naming.variables or naming.type_short_map)
+            and kind == ResourceKind.RESOURCE
+            and component_name != "shared"
+        ):
+            lname = naming.apply(rtype, component_name)
+
+        rid = Resource.make_id(rtype, lname)
+
+        # Resolve depends_on from logical ids to canonical ids
+        depends_on_logical: list[str] = raw.get("depends_on_logical", [])
+        depends_on = [d for d in depends_on_logical if d]
+
+        # Data sources are read-only lookups -- no managed_by tags
         if kind == ResourceKind.DATA:
             tags: dict[str, str] = {}
         else:
-            base_tags = {
+            base_tags: dict[str, str] = {**convention_tag_defaults}
+            base_tags.update({
                 "managed_by": "natural-iac",
                 "contract": contract.name,
                 "component": component_name,
-            }
+            })
             component = next(
                 (c for c in contract.components if c.name == component_name), None
             )
@@ -252,13 +333,18 @@ def _build_plan(
             base_tags.update(raw.get("tags") or {})
             tags = base_tags
 
+        # Apply org-wide property defaults (conventions win over LLM output)
+        properties: dict[str, Any] = raw.get("properties", {})
+        if conventions is not None and kind == ResourceKind.RESOURCE:
+            properties = conventions.defaults.apply(rtype, properties)
+
         resources.append(Resource(
             id=rid,
             type=rtype,
             logical_name=lname,
             component=component_name,
             kind=kind,
-            properties=raw.get("properties", {}),
+            properties=properties,
             depends_on=depends_on,
             tags=tags,
         ))

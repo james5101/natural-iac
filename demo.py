@@ -53,9 +53,14 @@ def check_key() -> str:
 async def run(key: str) -> None:
     import anthropic
     from natural_iac.contract import contract_to_yaml, validate_contract
+    from natural_iac.conventions import ConventionProfile
     from natural_iac.execution.terraform.renderer import render_to_dir
     from natural_iac.intent import IntentAgent
     from natural_iac.planner import PlannerAgent
+
+    conventions = ConventionProfile.load()
+    if conventions:
+        print(f"Loaded conventions from .niac/conventions.yaml")
 
     client = anthropic.AsyncAnthropic(api_key=key)
 
@@ -96,7 +101,7 @@ async def run(key: str) -> None:
     print("Calling Claude (planner agent)...")
 
     planner = PlannerAgent(client=client)
-    plan, trace = await planner.plan(intent_result.contract)
+    plan, trace = await planner.plan(intent_result.contract, conventions=conventions)
 
     # Debug: show raw tool call output
     for turn in trace.turns:
@@ -129,7 +134,7 @@ async def run(key: str) -> None:
     # Step 3: Render HCL
     # ------------------------------------------------------------------
     banner("STEP 3: Terraform HCL Renderer")
-    written = render_to_dir(plan, OUTPUT_HCL_DIR)
+    written = render_to_dir(plan, OUTPUT_HCL_DIR, conventions=conventions)
     print(f"Written to {OUTPUT_HCL_DIR}/")
     for p in written:
         print(f"  {p.name}  ({p.stat().st_size} bytes)")

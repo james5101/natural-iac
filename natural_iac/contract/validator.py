@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 from .schema import (
     Component,
@@ -17,6 +18,9 @@ from .schema import (
     InfraContract,
     InvariantSeverity,
 )
+
+if TYPE_CHECKING:
+    from ..conventions.schema import ConventionProfile
 
 _DATASTORE_ROLES = {
     ComponentRole.PRIMARY_DATASTORE,
@@ -155,7 +159,7 @@ def _check_human_reviewed(contract: InfraContract, result: ValidationResult) -> 
 # Invariant evaluation — simple DSL, extensible
 # ---------------------------------------------------------------------------
 
-_INVARIANT_RULES: dict[str, Any] = {}
+_INVARIANT_RULES: dict[str, Any] = {}  # reserved for future rule registry
 
 
 def _evaluate_invariant(rule: str, contract: InfraContract) -> bool | None:
@@ -221,10 +225,51 @@ def _check_invariants(contract: InfraContract, result: ValidationResult) -> None
 
 
 # ---------------------------------------------------------------------------
+# Convention checks
+# ---------------------------------------------------------------------------
+
+
+def _check_conventions(
+    contract: InfraContract,
+    profile: "ConventionProfile",
+    result: ValidationResult,
+) -> None:
+    """Validate that required tags can be satisfied by this contract.
+
+    The contract itself may not set every tag -- org defaults in the
+    conventions file will fill gaps at render time. We only error if a
+    required tag won't be covered by either the contract metadata or
+    the conventions defaults.
+    """
+    required = profile.tags.required
+    if not required:
+        return
+
+    # Tags available at render time = conventions defaults + contract metadata tags
+    covered: set[str] = set(profile.tags.defaults.keys())
+    covered.update(contract.metadata.get("tags", {}).keys())
+
+    missing = [t for t in required if t not in covered]
+    if missing:
+        result.add(Violation(
+            severity=Severity.ERROR,
+            rule="conventions.required_tags",
+            message=(
+                f"Required tag(s) {missing} are not provided by conventions defaults "
+                "or contract metadata. Add them to conventions.yaml tags.defaults "
+                "or to the contract metadata.tags field."
+            ),
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def validate_contract(contract: InfraContract) -> ValidationResult:
+def validate_contract(
+    contract: InfraContract,
+    conventions: "ConventionProfile | None" = None,
+) -> ValidationResult:
     """Run all constraint checks and invariant evaluations against a contract.
 
     Returns a ValidationResult — callers decide whether to treat warnings as
@@ -236,4 +281,6 @@ def validate_contract(contract: InfraContract) -> ValidationResult:
     _check_availability(contract, result)
     _check_human_reviewed(contract, result)
     _check_invariants(contract, result)
+    if conventions is not None:
+        _check_conventions(contract, conventions, result)
     return result
