@@ -157,3 +157,19 @@ class ConventionProfile(BaseModel):
             if m.match == resource_type:
                 return m
         return None
+
+    def load_module_variables(self) -> "dict[str, list]":
+        """Fetch variables.tf for each module override.
+
+        Returns a dict keyed by resource type (the match field):
+          {"aws_db_instance": [ModuleVariable(...), ...], ...}
+
+        Entries are empty lists if fetching failed -- callers fall back to
+        input_map/passthrough from the conventions file.
+        """
+        from .module_reader import fetch_module_variables
+
+        result: dict[str, list] = {}
+        for override in self.modules:
+            result[override.match] = fetch_module_variables(override.source)
+        return result

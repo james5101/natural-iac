@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from ...planner.schema import ExecutionPlan, Resource, ResourceKind
 
 if TYPE_CHECKING:
+    from ...conventions.module_reader import ModuleVariable
     from ...conventions.schema import ConventionProfile, ModuleOverride
 
 # Terraform AWS provider version pin
@@ -110,10 +111,17 @@ def _render_main(
     if managed:
         blocks.append('# --- Managed resources ---')
         blocks.append('')
+
+        # Pre-fetch module variables once for the whole plan
+        module_vars: dict[str, list] = {}
+        if conventions is not None and conventions.modules:
+            module_vars = conventions.load_module_variables()
+
         for resource in managed:
             module_override = conventions.module_for(resource.type) if conventions else None
             if module_override is not None:
-                blocks.append(_render_module(resource, module_override, conventions))
+                vars_ = module_vars.get(resource.type, [])
+                blocks.append(_render_module(resource, module_override, conventions, vars_))
             else:
                 blocks.append(_render_resource(resource))
             blocks.append('')
@@ -162,11 +170,16 @@ def _render_module(
     resource: Resource,
     override: "ModuleOverride",
     conventions: "ConventionProfile",
+    module_variables: "list[ModuleVariable] | None" = None,
 ) -> str:
     """Render a Terraform module block using the org's module override.
 
-    Properties are translated through override.input_map, with override.passthrough
-    names emitted as-is. Any remaining properties are dropped with a warning.
+    When module_variables are provided (fetched from variables.tf), any property
+    whose name matches a known variable is passed through directly -- the LLM
+    already used the right names. input_map/passthrough are checked as fallback.
+    Properties matching no known variable are dropped with a warning.
+
+    When module_variables is empty/None, falls back to input_map + passthrough.
     """
     module_name = override.resolve_name(
         resource.component,
@@ -181,19 +194,37 @@ def _render_module(
     emitted: set[str] = set()
     dropped: list[str] = []
 
-    # Mapped inputs
-    for prop_name, module_var in override.input_map.items():
-        if prop_name in props:
-            rendered = _hcl_value(props[prop_name], indent=1)
-            lines.append(f"  {module_var} = {rendered}")
-            emitted.add(prop_name)
+    known_var_names: set[str] = (
+        {v.name for v in module_variables} if module_variables else set()
+    )
 
-    # Passthrough inputs
-    for prop_name in override.passthrough:
-        if prop_name in props:
-            rendered = _hcl_value(props[prop_name], indent=1)
-            lines.append(f"  {prop_name} = {rendered}")
-            emitted.add(prop_name)
+    if known_var_names:
+        # Module variables fetched: LLM used the right names, pass matching ones through.
+        # Also honour any explicit input_map overrides.
+        for prop_name, value in props.items():
+            if prop_name in override.input_map:
+                # Explicit mapping takes priority
+                module_var = override.input_map[prop_name]
+                rendered = _hcl_value(value, indent=1)
+                lines.append(f"  {module_var} = {rendered}")
+                emitted.add(prop_name)
+            elif prop_name in known_var_names or prop_name in override.passthrough:
+                rendered = _hcl_value(value, indent=1)
+                lines.append(f"  {prop_name} = {rendered}")
+                emitted.add(prop_name)
+    else:
+        # No variable introspection -- use manual input_map + passthrough
+        for prop_name, module_var in override.input_map.items():
+            if prop_name in props:
+                rendered = _hcl_value(props[prop_name], indent=1)
+                lines.append(f"  {module_var} = {rendered}")
+                emitted.add(prop_name)
+
+        for prop_name in override.passthrough:
+            if prop_name in props:
+                rendered = _hcl_value(props[prop_name], indent=1)
+                lines.append(f"  {prop_name} = {rendered}")
+                emitted.add(prop_name)
 
     # Collect dropped properties and warn
     for prop_name in props:
@@ -204,7 +235,12 @@ def _render_module(
         warnings.warn(
             f"module '{module_name}' ({override.match}): "
             f"{len(dropped)} unmapped propert{'y' if len(dropped) == 1 else 'ies'} dropped: "
-            f"{', '.join(dropped)}. Add to input_map or passthrough in conventions.yaml.",
+            f"{', '.join(dropped)}. "
+            + (
+                "Add to input_map or passthrough in conventions.yaml."
+                if not known_var_names
+                else "These names do not match any variable in the module's variables.tf."
+            ),
             stacklevel=2,
         )
 

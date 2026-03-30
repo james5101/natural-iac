@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from natural_iac.conventions import ConventionProfile, ModuleOverride, NamingConfig, TagConfig
+from natural_iac.conventions import ConventionProfile, ModuleOverride, ModuleVariable, NamingConfig, TagConfig
+from natural_iac.conventions.module_reader import (
+    _github_raw_variables_url,
+    _parse_variables_tf,
+    clear_cache,
+    fetch_module_variables,
+    format_variables_for_prompt,
+)
 from natural_iac.conventions.schema import DefaultsConfig
 from natural_iac.contract import (
     Component,
@@ -511,3 +518,266 @@ class TestPlannerConventions:
         assert resource.tags["CostCenter"] == "platform-eng"
         assert resource.tags["Owner"] == "infra-team"
         assert resource.tags["managed_by"] == "natural-iac"  # still present
+
+
+# ---------------------------------------------------------------------------
+# Module reader: URL parsing
+# ---------------------------------------------------------------------------
+
+
+class TestGithubRawVariablesUrl:
+    def test_git_prefix_with_ref(self):
+        url = _github_raw_variables_url(
+            "git::https://github.com/acme/tf-modules.git//rds?ref=v3.1.0"
+        )
+        assert url == "https://raw.githubusercontent.com/acme/tf-modules/v3.1.0/rds/variables.tf"
+
+    def test_git_prefix_no_https(self):
+        url = _github_raw_variables_url(
+            "git::github.com/acme/tf-modules//rds?ref=v1.0"
+        )
+        assert url == "https://raw.githubusercontent.com/acme/tf-modules/v1.0/rds/variables.tf"
+
+    def test_no_subdir(self):
+        url = _github_raw_variables_url("git::github.com/acme/tf-rds?ref=v2.0")
+        assert url == "https://raw.githubusercontent.com/acme/tf-rds/v2.0/variables.tf"
+
+    def test_llm_tree_url_format(self):
+        # LLM sometimes generates github.com browser URL with /tree/{ref}
+        url = _github_raw_variables_url(
+            "git::github.com/terraform-aws-modules/terraform-aws-rds/tree/v7.2.0"
+        )
+        assert url == "https://raw.githubusercontent.com/terraform-aws-modules/terraform-aws-rds/v7.2.0/variables.tf"
+
+    def test_non_github_returns_none(self):
+        assert _github_raw_variables_url("registry.terraform.io/hashicorp/consul/aws") is None
+        assert _github_raw_variables_url("./local/module") is None
+
+    def test_plain_github_no_ref_defaults_main(self):
+        url = _github_raw_variables_url("github.com/acme/tf-modules")
+        assert url == "https://raw.githubusercontent.com/acme/tf-modules/main/variables.tf"
+
+
+# ---------------------------------------------------------------------------
+# Module reader: HCL parsing
+# ---------------------------------------------------------------------------
+
+
+SAMPLE_VARIABLES_TF = """\
+variable "identifier" {
+  description = "The name of the RDS instance"
+  type        = string
+}
+
+variable "engine" {
+  description = "The database engine"
+  type        = string
+  default     = "postgres"
+}
+
+variable "instance_class" {
+  description = "The instance type of the RDS instance"
+  type        = string
+}
+
+variable "db_name" {
+  description = "The DB name. Note that this is not applicable for Oracle"
+  type        = string
+  default     = null
+}
+
+variable "allocated_storage" {
+  description = "The allocated storage in gigabytes"
+  type        = number
+}
+
+variable "storage_encrypted" {
+  description = "Specifies whether the DB instance is encrypted"
+  type        = bool
+  default     = true
+}
+"""
+
+
+class TestParseVariablesTf:
+    def test_parses_all_variables(self):
+        variables = _parse_variables_tf(SAMPLE_VARIABLES_TF)
+        names = {v.name for v in variables}
+        assert names == {
+            "identifier", "engine", "instance_class", "db_name",
+            "allocated_storage", "storage_encrypted",
+        }
+
+    def test_required_vs_optional(self):
+        variables = _parse_variables_tf(SAMPLE_VARIABLES_TF)
+        by_name = {v.name: v for v in variables}
+
+        assert by_name["identifier"].required is True
+        assert by_name["instance_class"].required is True
+        assert by_name["allocated_storage"].required is True
+
+        assert by_name["engine"].required is False
+        assert by_name["db_name"].required is False
+        assert by_name["storage_encrypted"].required is False
+
+    def test_types_extracted(self):
+        variables = _parse_variables_tf(SAMPLE_VARIABLES_TF)
+        by_name = {v.name: v for v in variables}
+        assert by_name["identifier"].type == "string"
+        assert by_name["allocated_storage"].type == "number"
+        assert by_name["storage_encrypted"].type == "bool"
+
+    def test_descriptions_extracted(self):
+        variables = _parse_variables_tf(SAMPLE_VARIABLES_TF)
+        by_name = {v.name: v for v in variables}
+        assert "RDS instance" in by_name["identifier"].description
+        assert "database engine" in by_name["engine"].description
+
+    def test_empty_file_returns_empty_list(self):
+        assert _parse_variables_tf("") == []
+
+
+# ---------------------------------------------------------------------------
+# Module reader: fetch with mock
+# ---------------------------------------------------------------------------
+
+
+class TestFetchModuleVariables:
+    def setup_method(self):
+        clear_cache()
+
+    def test_returns_empty_on_non_github_source(self):
+        variables = fetch_module_variables("./local/module")
+        assert variables == []
+
+    def test_uses_cache_on_second_call(self, monkeypatch):
+        call_count = 0
+
+        def mock_fetch(url, timeout=5):
+            nonlocal call_count
+            call_count += 1
+            return SAMPLE_VARIABLES_TF
+
+        monkeypatch.setattr(
+            "natural_iac.conventions.module_reader._fetch_url", mock_fetch
+        )
+
+        source = "git::github.com/acme/tf-rds?ref=v1.0"
+        fetch_module_variables(source)
+        fetch_module_variables(source)
+
+        assert call_count == 1  # second call hit cache
+
+    def test_returns_parsed_variables_on_success(self, monkeypatch):
+        monkeypatch.setattr(
+            "natural_iac.conventions.module_reader._fetch_url",
+            lambda url, timeout=5: SAMPLE_VARIABLES_TF,
+        )
+
+        variables = fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
+        assert len(variables) == 6
+        names = {v.name for v in variables}
+        assert "identifier" in names
+        assert "db_name" in names
+
+    def test_returns_empty_on_fetch_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            "natural_iac.conventions.module_reader._fetch_url",
+            lambda url, timeout=5: None,
+        )
+        variables = fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
+        assert variables == []
+
+
+# ---------------------------------------------------------------------------
+# Renderer: module block with fetched variables
+# ---------------------------------------------------------------------------
+
+
+class TestModuleRenderingWithVariables:
+    def _profile_and_vars(self):
+        profile = ConventionProfile(
+            naming=NamingConfig(type_short_map={"aws_db_instance": "rds"}),
+            modules=[
+                ModuleOverride(
+                    match="aws_db_instance",
+                    source="git::github.com/acme/tf-modules//rds?ref=v1.0",
+                    name_template="rds_{component}",
+                )
+            ],
+        )
+        # Simulate fetched variables -- LLM has already used these names
+        vars_ = [
+            ModuleVariable("identifier", "string", "RDS instance name", required=True),
+            ModuleVariable("instance_class", "string", "Instance type", required=True),
+            ModuleVariable("db_name", "string", "Database name", required=False),
+            ModuleVariable("storage_encrypted", "bool", "Enable encryption", required=False),
+        ]
+        return profile, vars_
+
+    def test_known_variable_names_pass_through_directly(self):
+        profile, vars_ = self._profile_and_vars()
+        # LLM emitted the module's actual variable names
+        resource = make_resource(
+            "aws_db_instance", "db", "db",
+            identifier="prod-db",
+            instance_class="db.t4g.small",
+            db_name="myapp",
+            storage_encrypted=True,
+        )
+        plan = make_plan([resource])
+
+        from natural_iac.execution.terraform.renderer import _render_module
+        override = profile.modules[0]
+        hcl = _render_module(resource, override, profile, vars_)
+
+        assert 'identifier = "prod-db"' in hcl
+        assert 'db_name = "myapp"' in hcl
+        assert "instance_class" in hcl
+        assert "storage_encrypted = true" in hcl
+
+    def test_unknown_property_dropped_with_warning(self):
+        profile, vars_ = self._profile_and_vars()
+        resource = make_resource(
+            "aws_db_instance", "db", "db",
+            identifier="prod-db",
+            unknown_prop="value",   # not in module variables
+        )
+
+        from natural_iac.execution.terraform.renderer import _render_module
+        override = profile.modules[0]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            hcl = _render_module(resource, override, profile, vars_)
+
+        assert any("unknown_prop" in str(w.message) for w in caught)
+        assert "unknown_prop" not in hcl
+
+    def test_explicit_input_map_takes_priority_over_variable_names(self):
+        profile = ConventionProfile(
+            modules=[
+                ModuleOverride(
+                    match="aws_db_instance",
+                    source="git::github.com/acme/tf-modules//rds?ref=v1.0",
+                    name_template="rds_{component}",
+                    input_map={"instance_class": "db_instance_class"},  # explicit override
+                )
+            ],
+        )
+        vars_ = [
+            ModuleVariable("db_instance_class", "string", required=True),
+            ModuleVariable("instance_class", "string", required=False),
+        ]
+        resource = make_resource(
+            "aws_db_instance", "db", "db",
+            instance_class="db.t4g.small",
+        )
+
+        from natural_iac.execution.terraform.renderer import _render_module
+        override = profile.modules[0]
+        hcl = _render_module(resource, override, profile, vars_)
+
+        # Explicit input_map translated instance_class -> db_instance_class
+        assert "db_instance_class" in hcl
+        assert "  instance_class =" not in hcl

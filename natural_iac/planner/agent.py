@@ -156,7 +156,14 @@ class PlannerAgent:
             Full conversation record for observability.
         """
         trace = PlannerTrace(contract_id=contract.id)
-        user_message = _build_user_message(contract, conventions)
+
+        # Fetch module variables before building the prompt so the LLM knows
+        # what inputs each module override actually accepts.
+        module_vars: "dict[str, list]" = {}
+        if conventions is not None and conventions.modules:
+            module_vars = conventions.load_module_variables()
+
+        user_message = _build_user_message(contract, conventions, module_vars)
         messages: list[dict] = [{"role": "user", "content": user_message}]
         trace.turns.append({"role": "user", "content": user_message})
 
@@ -186,6 +193,7 @@ class PlannerAgent:
 def _build_user_message(
     contract: InfraContract,
     conventions: "ConventionProfile | None" = None,
+    module_vars: "dict[str, list] | None" = None,
 ) -> str:
     """Render the contract (and optional conventions) as a clear planning request."""
     from ..contract.serializer import contract_to_yaml
@@ -201,13 +209,18 @@ def _build_user_message(
     ]
 
     if conventions is not None:
-        lines += ["", _build_conventions_section(conventions)]
+        lines += ["", _build_conventions_section(conventions, module_vars or {})]
 
     return "\n".join(lines)
 
 
-def _build_conventions_section(conventions: "ConventionProfile") -> str:
+def _build_conventions_section(
+    conventions: "ConventionProfile",
+    module_vars: "dict[str, list]",
+) -> str:
     """Render the conventions as an instruction block appended to the user message."""
+    from ..conventions.module_reader import format_variables_for_prompt
+
     parts = ["## Org conventions -- follow these exactly", ""]
 
     naming = conventions.naming
@@ -234,17 +247,34 @@ def _build_conventions_section(conventions: "ConventionProfile") -> str:
         parts.append("")
 
     if conventions.modules:
-        parts.append("### Module overrides (use these instead of raw resource types):")
-        for mod in conventions.modules:
-            parts.append(f"  {mod.match} -> module source: {mod.source}")
-            parts.append(f"    name: {mod.name_template}")
-            if mod.input_map:
-                parts.append("    input_map: " + str(mod.input_map))
+        parts.append("### Module overrides")
         parts.append(
-            "Emit these resource types normally -- the renderer will convert them to "
-            "module blocks using the input_map. You do not need to change property names."
+            "When planning these resource types, emit the module's variable names "
+            "as property keys (not the raw Terraform resource property names). "
+            "The renderer will emit a module block using exactly the names you provide."
         )
         parts.append("")
+        for mod in conventions.modules:
+            parts.append(f"#### {mod.match}")
+            parts.append(f"  source: {mod.source}")
+            parts.append(f"  module name template: {mod.name_template}")
+
+            vars_ = module_vars.get(mod.match, [])
+            if vars_:
+                parts.append(f"  Variables (fetched from module source -- use these exact names):")
+                parts.append(format_variables_for_prompt(vars_))
+                parts.append(
+                    "  IMPORTANT: Emit property names that match these variable names exactly. "
+                    "Only emit variables that are relevant to the contract component. "
+                    "Omit optional variables unless you have a specific value for them."
+                )
+            elif mod.input_map:
+                parts.append("  Property name mapping (emit the LEFT side; renderer translates to RIGHT):")
+                for our_name, module_var in mod.input_map.items():
+                    parts.append(f"    {our_name} -> {module_var}")
+                if mod.passthrough:
+                    parts.append(f"  Pass through unchanged: {', '.join(mod.passthrough)}")
+            parts.append("")
 
     if conventions.defaults.overrides:
         parts.append("### Property defaults (applied after your output -- you may omit these):")
