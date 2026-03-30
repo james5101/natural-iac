@@ -11,3 +11,12 @@ dist/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+
+# Claude Code local memory
+.claude/
+
+# Generated pipeline outputs (committed deliberately when needed, not by default)
+*-terraform-out/
+terraform-out/
+*.contract.yaml
+!examples/*.contract.yaml

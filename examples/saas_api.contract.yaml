@@ -1,0 +1,77 @@
+schema_version: v1
+id: 3f8a1c2d-0001-0000-0000-000000000001
+name: saas-api
+description: >
+  Backend API for a SaaS product: HTTP API, Postgres datastore,
+  Redis cache, and an async job queue for background work.
+human_reviewed: false
+
+components:
+  - name: api
+    role: web_api
+    description: Main HTTP API — stateless, horizontally scalable
+    requirements:
+      availability: high
+      size_hint: small
+      publicly_accessible: true
+    depends_on: [db, cache, jobs]
+    tags:
+      team: platform
+      tier: "1"
+
+  - name: db
+    role: primary_datastore
+    description: Primary Postgres database
+    requirements:
+      availability: high
+      size_hint: small
+      publicly_accessible: false
+      backup_retention_days: 14
+      read_replicas: 1
+    tags:
+      team: platform
+
+  - name: cache
+    role: cache
+    description: Redis cache for session data and hot reads
+    requirements:
+      availability: standard
+      size_hint: micro
+      publicly_accessible: false
+    depends_on: []
+
+  - name: jobs
+    role: job_queue
+    description: Async job queue for email delivery and data exports
+    requirements:
+      availability: standard
+      size_hint: micro
+      publicly_accessible: false
+
+constraints:
+  security:
+    no_public_datastores: true
+    encryption_at_rest: true
+    encryption_in_transit: true
+    allowed_regions:
+      - us-east-1
+      - us-west-2
+
+  cost:
+    max_monthly_usd: 500.0
+    alert_threshold_usd: 400.0
+
+  compliance:
+    frameworks:
+      - SOC2
+
+invariants:
+  - name: no-public-db
+    description: The primary datastore must never be publicly accessible
+    rule: no primary_datastore is publicly_accessible
+    severity: error
+
+  - name: no-public-cache
+    description: Cache must never be publicly accessible
+    rule: no cache is publicly_accessible
+    severity: error
