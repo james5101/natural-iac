@@ -1,0 +1,32 @@
+version: v1
+
+naming:
+  pattern: "{env}-{component}-{type_short}"
+  variables:
+  type_short_map:
+    aws_instance: ec2
+    aws_db_instance: rds
+    aws_security_group: sg
+
+tags:
+  required:
+    - CostCenter
+  defaults:
+    CostCenter: platform-eng
+    ManagedBy: natural-iac
+    Environment: "${env}"
+
+modules:
+  - match: aws_db_instance
+    source: "git::github.com/terraform-aws-modules/terraform-aws-rds/tree/v7.2.0"
+    name_template: "rds_{component}"
+    input_map:
+      instance_class: db_instance_class
+      storage_encrypted: encryption_enabled
+    passthrough:
+      - deletion_protection
+      - engine_version
+
+defaults:
+  aws_db_instance:
+    deletion_protection: true

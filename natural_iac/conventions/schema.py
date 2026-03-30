@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 _CONVENTIONS_PATH = Path(".niac/conventions.yaml")
 
@@ -34,6 +34,11 @@ class NamingConfig(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
     type_short_map: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("variables", "type_short_map", mode="before")
+    @classmethod
+    def _none_to_dict(cls, v: Any) -> Any:
+        return v if v is not None else {}
+
     def apply(self, resource_type: str, component: str) -> str:
         """Return the logical name for a resource given its type and component."""
         type_short = self.type_short_map.get(resource_type, resource_type)
@@ -53,6 +58,16 @@ class NamingConfig(BaseModel):
 class TagConfig(BaseModel):
     required: list[str] = Field(default_factory=list)
     defaults: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("required", mode="before")
+    @classmethod
+    def _none_to_list(cls, v: Any) -> Any:
+        return v if v is not None else []
+
+    @field_validator("defaults", mode="before")
+    @classmethod
+    def _none_to_dict(cls, v: Any) -> Any:
+        return v if v is not None else {}
 
     def resolve_defaults(self, variables: dict[str, str]) -> dict[str, str]:
         """Return defaults with ${var} placeholders resolved from naming variables."""
@@ -132,6 +147,11 @@ class ConventionProfile(BaseModel):
     tags: TagConfig = Field(default_factory=TagConfig)
     modules: list[ModuleOverride] = Field(default_factory=list)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
+
+    @field_validator("modules", mode="before")
+    @classmethod
+    def _none_to_list(cls, v: Any) -> Any:
+        return v if v is not None else []
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "ConventionProfile | None":
