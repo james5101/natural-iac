@@ -527,35 +527,53 @@ class TestPlannerConventions:
 
 class TestGithubRawVariablesUrl:
     def test_git_prefix_with_ref(self):
-        url = _github_raw_variables_url(
+        url, host = _github_raw_variables_url(
             "git::https://github.com/acme/tf-modules.git//rds?ref=v3.1.0"
         )
         assert url == "https://raw.githubusercontent.com/acme/tf-modules/v3.1.0/rds/variables.tf"
+        assert host == "github.com"
 
     def test_git_prefix_no_https(self):
-        url = _github_raw_variables_url(
+        url, host = _github_raw_variables_url(
             "git::github.com/acme/tf-modules//rds?ref=v1.0"
         )
         assert url == "https://raw.githubusercontent.com/acme/tf-modules/v1.0/rds/variables.tf"
 
     def test_no_subdir(self):
-        url = _github_raw_variables_url("git::github.com/acme/tf-rds?ref=v2.0")
+        url, _ = _github_raw_variables_url("git::github.com/acme/tf-rds?ref=v2.0")
         assert url == "https://raw.githubusercontent.com/acme/tf-rds/v2.0/variables.tf"
 
     def test_llm_tree_url_format(self):
-        # LLM sometimes generates github.com browser URL with /tree/{ref}
-        url = _github_raw_variables_url(
+        url, _ = _github_raw_variables_url(
             "git::github.com/terraform-aws-modules/terraform-aws-rds/tree/v7.2.0"
         )
         assert url == "https://raw.githubusercontent.com/terraform-aws-modules/terraform-aws-rds/v7.2.0/variables.tf"
 
     def test_non_github_returns_none(self):
-        assert _github_raw_variables_url("registry.terraform.io/hashicorp/consul/aws") is None
-        assert _github_raw_variables_url("./local/module") is None
+        url, host = _github_raw_variables_url("registry.terraform.io/hashicorp/consul/aws")
+        assert url is None and host is None
+        url, host = _github_raw_variables_url("./local/module")
+        assert url is None and host is None
 
     def test_plain_github_no_ref_defaults_main(self):
-        url = _github_raw_variables_url("github.com/acme/tf-modules")
+        url, _ = _github_raw_variables_url("github.com/acme/tf-modules")
         assert url == "https://raw.githubusercontent.com/acme/tf-modules/main/variables.tf"
+
+    # --- GitHub Enterprise ---
+
+    def test_github_enterprise_hostname(self):
+        url, host = _github_raw_variables_url(
+            "git::github.mycompany.com/infra/tf-modules//rds?ref=v3.0"
+        )
+        assert url == "https://github.mycompany.com/infra/tf-modules/raw/v3.0/rds/variables.tf"
+        assert host == "github.mycompany.com"
+
+    def test_github_enterprise_no_subdir(self):
+        url, host = _github_raw_variables_url(
+            "git::github.acme.io/infra/tf-rds?ref=v1.5"
+        )
+        assert url == "https://github.acme.io/infra/tf-rds/raw/v1.5/variables.tf"
+        assert host == "github.acme.io"
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +671,7 @@ class TestFetchModuleVariables:
     def test_uses_cache_on_second_call(self, monkeypatch):
         call_count = 0
 
-        def mock_fetch(url, timeout=5):
+        def mock_fetch(url, token=None, timeout=5):
             nonlocal call_count
             call_count += 1
             return SAMPLE_VARIABLES_TF
@@ -671,7 +689,7 @@ class TestFetchModuleVariables:
     def test_returns_parsed_variables_on_success(self, monkeypatch):
         monkeypatch.setattr(
             "natural_iac.conventions.module_reader._fetch_url",
-            lambda url, timeout=5: SAMPLE_VARIABLES_TF,
+            lambda url, token=None, timeout=5: SAMPLE_VARIABLES_TF,
         )
 
         variables = fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
@@ -683,10 +701,107 @@ class TestFetchModuleVariables:
     def test_returns_empty_on_fetch_failure(self, monkeypatch):
         monkeypatch.setattr(
             "natural_iac.conventions.module_reader._fetch_url",
-            lambda url, timeout=5: None,
+            lambda url, token=None, timeout=5: None,
         )
-        variables = fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            variables = fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
         assert variables == []
+
+    def test_token_passed_to_fetch(self, monkeypatch):
+        captured: dict = {}
+
+        def mock_fetch(url, token=None, timeout=5):
+            captured["token"] = token
+            return SAMPLE_VARIABLES_TF
+
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_testtoken123")
+        monkeypatch.setattr("natural_iac.conventions.module_reader._fetch_url", mock_fetch)
+
+        fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
+        assert captured["token"] == "ghp_testtoken123"
+
+    def test_gh_token_alias_accepted(self, monkeypatch):
+        captured: dict = {}
+
+        def mock_fetch(url, token=None, timeout=5):
+            captured["token"] = token
+            return SAMPLE_VARIABLES_TF
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GH_TOKEN", "ghp_alias456")
+        monkeypatch.setattr("natural_iac.conventions.module_reader._fetch_url", mock_fetch)
+
+        fetch_module_variables("git::github.com/acme/tf-rds?ref=v1.0")
+        assert captured["token"] == "ghp_alias456"
+
+    def test_no_token_when_env_not_set(self, monkeypatch):
+        captured: dict = {}
+
+        def mock_fetch(url, token=None, timeout=5):
+            captured["token"] = token
+            return SAMPLE_VARIABLES_TF
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.setattr("natural_iac.conventions.module_reader._fetch_url", mock_fetch)
+
+        fetch_module_variables("git::github.com/acme/public-module?ref=v1.0")
+        assert captured["token"] is None
+
+    def test_local_path_takes_priority_over_network(self, tmp_path, monkeypatch):
+        # Write a local variables.tf
+        (tmp_path / "variables.tf").write_text(
+            'variable "local_var" { type = string }', encoding="utf-8"
+        )
+        fetch_count = 0
+
+        def mock_fetch(url, token=None, timeout=5):
+            nonlocal fetch_count
+            fetch_count += 1
+            return SAMPLE_VARIABLES_TF  # would return different content
+
+        monkeypatch.setattr("natural_iac.conventions.module_reader._fetch_url", mock_fetch)
+
+        variables = fetch_module_variables(
+            "git::github.com/acme/tf-rds?ref=v1.0",
+            local_path=str(tmp_path),
+        )
+
+        assert fetch_count == 0  # network never called
+        assert len(variables) == 1
+        assert variables[0].name == "local_var"
+
+    def test_fetch_failure_emits_actionable_warning(self, monkeypatch):
+        monkeypatch.setattr(
+            "natural_iac.conventions.module_reader._fetch_url",
+            lambda url, token=None, timeout=5: None,
+        )
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fetch_module_variables("git::github.com/acme/private-module?ref=v1.0")
+
+        assert len(caught) == 1
+        msg = str(caught[0].message)
+        assert "GITHUB_TOKEN" in msg
+        assert "local_path" in msg
+
+    def test_fetch_failure_with_token_gives_scope_hint(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_expired")
+        monkeypatch.setattr(
+            "natural_iac.conventions.module_reader._fetch_url",
+            lambda url, token=None, timeout=5: None,
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fetch_module_variables("git::github.com/acme/private-module?ref=v1.0")
+
+        msg = str(caught[0].message)
+        assert "scope" in msg.lower() or "token" in msg.lower()
 
 
 # ---------------------------------------------------------------------------

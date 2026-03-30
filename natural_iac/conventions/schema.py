@@ -77,6 +77,8 @@ class ModuleOverride(BaseModel):
 
     input_map:   {our_property_name: module_variable_name}
     passthrough: property names passed through with their original name
+    local_path:  path to a local checkout of the module (takes priority over
+                 network fetch; useful for private repos without a token)
     Unmapped, non-passthrough properties are dropped with a warning.
     """
     match: str  # Terraform resource type, e.g. "aws_db_instance"
@@ -84,6 +86,7 @@ class ModuleOverride(BaseModel):
     name_template: str = "{component}"  # {component} and {type_short} available
     input_map: dict[str, str] = Field(default_factory=dict)
     passthrough: list[str] = Field(default_factory=list)
+    local_path: str | None = None  # local checkout for private/offline modules
 
     def resolve_name(self, component: str, resource_type: str, type_short_map: dict[str, str]) -> str:
         type_short = type_short_map.get(resource_type, resource_type)
@@ -171,5 +174,8 @@ class ConventionProfile(BaseModel):
 
         result: dict[str, list] = {}
         for override in self.modules:
-            result[override.match] = fetch_module_variables(override.source)
+            result[override.match] = fetch_module_variables(
+                override.source,
+                local_path=override.local_path,
+            )
         return result
